@@ -1,0 +1,351 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import os
+from pathlib import Path
+from annotate_v import annotate
+import threading
+from Bio.Seq import Seq
+import datetime
+
+from seq_files.new_logic import heavy_chain_aa
+
+
+class AntibodyAnnotatorGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Antibody Sequence Annotator")
+        self.root.geometry("800x600")
+
+        # Variables
+        self.selected_files = []
+        self.output_dir = tk.StringVar(value=str(Path.home()))
+
+        # Create main frame
+        main_frame = ttk.Frame(root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        # Configure grid weights
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(1, weight=1)
+        main_frame.rowconfigure(2, weight=1)
+
+        # Title
+        title_label = ttk.Label(main_frame, text="Antibody Sequence Annotator",
+                                font=('Arial', 16, 'bold'))
+        title_label.grid(row=0, column=0, columnspan=3, pady=10)
+
+        # File selection section
+        file_label = ttk.Label(main_frame, text="Selected Files:")
+        file_label.grid(row=1, column=0, sticky=tk.W, pady=5)
+
+        # File listbox with scrollbar
+        file_frame = ttk.Frame(main_frame)
+        file_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+
+        self.file_listbox = tk.Listbox(file_frame, height=10, selectmode=tk.EXTENDED)
+        self.file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(file_frame, orient=tk.VERTICAL, command=self.file_listbox.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.file_listbox.config(yscrollcommand=scrollbar.set)
+
+        # Buttons frame
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=3, column=0, columnspan=3, pady=10)
+
+        self.select_button = ttk.Button(button_frame, text="Select .seq Files",
+                                        command=self.select_files)
+        self.select_button.pack(side=tk.LEFT, padx=5)
+
+        self.remove_button = ttk.Button(button_frame, text="Remove Selected",
+                                        command=self.remove_selected)
+        self.remove_button.pack(side=tk.LEFT, padx=5)
+
+        self.clear_button = ttk.Button(button_frame, text="Clear All",
+                                       command=self.clear_files)
+        self.clear_button.pack(side=tk.LEFT, padx=5)
+
+        # Output directory selection
+        output_label = ttk.Label(main_frame, text="Output Directory:")
+        output_label.grid(row=4, column=0, sticky=tk.W, pady=5)
+
+        output_entry = ttk.Entry(main_frame, textvariable=self.output_dir, state='readonly')
+        output_entry.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=5, padx=5)
+
+        output_button = ttk.Button(main_frame, text="Browse", command=self.select_output_dir)
+        output_button.grid(row=4, column=2, pady=5)
+
+        # Progress bar
+        self.progress = ttk.Progressbar(main_frame, mode='indeterminate')
+        self.progress.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
+
+        # Status label
+        self.status_label = ttk.Label(main_frame, text="Ready to process files")
+        self.status_label.grid(row=6, column=0, columnspan=3, pady=5)
+
+        # Execute button
+        self.execute_button = ttk.Button(main_frame, text="Execute",
+                                         command=self.execute_processing,
+                                         style='Accent.TButton')
+        self.execute_button.grid(row=7, column=0, columnspan=3, pady=10)
+
+        # Configure button style
+        style = ttk.Style()
+        style.configure('Accent.TButton', font=('Arial', 12, 'bold'))
+
+    def select_files(self):
+        files = filedialog.askopenfilenames(
+            title="Select .seq files",
+            filetypes=[("SEQ files", "*.seq"), ("All files", "*.*")]
+        )
+        for file in files:
+            if file not in self.selected_files:
+                self.selected_files.append(file)
+                self.file_listbox.insert(tk.END, os.path.basename(file))
+        self.update_status(f"Selected {len(self.selected_files)} file(s)")
+
+    def remove_selected(self):
+        selected_indices = list(self.file_listbox.curselection())
+        for index in reversed(selected_indices):
+            self.file_listbox.delete(index)
+            del self.selected_files[index]
+        self.update_status(f"Removed {len(selected_indices)} file(s)")
+
+    def clear_files(self):
+        self.file_listbox.delete(0, tk.END)
+        self.selected_files = []
+        self.update_status("All files cleared")
+
+    def select_output_dir(self):
+        directory = filedialog.askdirectory(title="Select Output Directory")
+        if directory:
+            self.output_dir.set(directory)
+
+    def update_status(self, message):
+        self.status_label.config(text=message)
+        self.root.update()
+
+    def execute_processing(self):
+        if not self.selected_files:
+            messagebox.showwarning("No Files", "Please select at least one .seq file to process.")
+            return
+
+        # Disable buttons during processing
+        self.execute_button.config(state='disabled')
+        self.select_button.config(state='disabled')
+
+        # Start progress bar
+        self.progress.start()
+
+        # Run processing in a separate thread to keep GUI responsive
+        thread = threading.Thread(target=self.process_files)
+        thread.start()
+
+    def process_files(self):
+        successful = 0
+        failed = 0
+
+        for i, file_path in enumerate(self.selected_files):
+            try:
+                self.update_status(
+                    f"Processing file {i + 1} of {len(self.selected_files)}: {os.path.basename(file_path)}")
+
+                # Read the .seq file
+                with open(file_path, 'r') as f:
+                    sanger_seq = f.read().split("\n")[1]
+
+                # Process the sequence
+                output_filename = os.path.splitext(os.path.basename(file_path))[0] + "_annotated.gb"
+                output_path = os.path.join(self.output_dir.get(), output_filename)
+
+                self.process_sequence(sanger_seq, output_path)
+                successful += 1
+
+            except Exception as e:
+                failed += 1
+                self.root.after(0, lambda e=e, f=file_path: messagebox.showerror(
+                    "Processing Error",
+                    f"Error processing {os.path.basename(f)}:\n{str(e)}"
+                ))
+
+        # Update UI in main thread
+        self.root.after(0, self.processing_complete, successful, failed)
+
+    def processing_complete(self, successful, failed):
+        self.progress.stop()
+        self.execute_button.config(state='normal')
+        self.select_button.config(state='normal')
+
+        message = f"Processing complete!\nSuccessful: {successful}\nFailed: {failed}"
+        self.update_status(message)
+        messagebox.showinfo("Processing Complete", message)
+
+
+
+    def process_sequence(self, sanger_seq, output_path):
+
+        [frameshift, rev_com, split_pos] = self.find_GGGGS(sanger_seq)
+        if rev_com == True:
+            sanger_seq = Seq(sanger_seq).reverse_complement()
+        sanger_seq = sanger_seq[frameshift:]
+        split_pos = ((split_pos) * 3)  # + frameshift
+
+        heavy_chain_dna = sanger_seq[0:split_pos]
+        light_chain_dna = sanger_seq[split_pos + 45:]
+        heavy_chain_aa = str(Seq(heavy_chain_dna).translate())
+        light_chain_aa = str(Seq(light_chain_dna).translate())
+        light_chain_aa = light_chain_aa[:light_chain_aa.find("GAAA")]  # trim tags
+        scfv_aa = str(Seq(sanger_seq).translate())
+
+        if heavy_chain_aa.find("*") > -1:
+            heavy_chain_aa = heavy_chain_aa[heavy_chain_aa.find("*")+1:]
+        # Retrieve annotations
+        scheme = "imgt"
+
+        # Heavy chain annotation
+        seq = annotate(heavy_chain_aa, scheme)
+        annotate_result_heavy = seq.retrieve()
+
+        # Light chain annotation
+        seq = annotate(light_chain_aa, scheme)
+        annotate_result_light = seq.retrieve()
+        start = (heavy_chain_aa.find(annotate_result_heavy[0]["H-FR1"]))
+        end = start + len(annotate_result_heavy[0]["H-FR1"])
+
+        # Write GenBank file
+        with open(output_path, "w") as text_file:
+            text_file.write(
+            f"""LOCUS       Un+                                                                                                                     titled         {len(sanger_seq)} bp DNA     linear   SYN {datetime.date.today()}
+DEFINITION  .
+ACCESSION   .
+VERSION     .
+KEYWORDS    .
+SOURCE      synthetic DNA construct
+  ORGANISM  synthetic DNA construct
+REFERENCE   1  (bases 1 to {len(sanger_seq)})
+  AUTHORS   JPA
+  TITLE     annotator
+  JOURNAL   Created by Antibody_Annotator v1
+
+FEATURES             Location/Qualifiers
+     source          1..930
+                     /mol_type="other DNA"
+                     /organism="synthetic DNA construct"
+""")
+            count = 0
+            h_keys = list(annotate_result_heavy[0])
+            for i in annotate_result_heavy[0]:
+                text_file.write(f"""     CDS             {start * 3 + 1}..{end * 3}
+                         /codon_start=1
+                        /label={i}
+                        /note="color: #993366"
+                        /translation="{annotate_result_heavy[0][i]}"\n""")
+                start = end
+                try:
+                    end = start + len(annotate_result_heavy[0][h_keys[count + 1]])
+                except:
+                    end = start
+                count += 1
+
+            ##Light chain
+            scheme = "imgt"
+
+            seq = annotate(light_chain_aa, scheme)
+
+            annotate_result_light = seq.retrieve()
+
+            start = (scfv_aa.find(annotate_result_light[0]["L-FR1"]))
+            end = start + len(annotate_result_light[0]["L-FR1"])
+
+            count = 0
+            h_keys = list(annotate_result_light[0])
+            for i in annotate_result_light[0]:
+                text_file.write(f"""     CDS             {start * 3 + 1}..{end * 3}
+                        /codon_start=1
+                        /label={i}
+                        /note="color: #993366"
+                        /translation="{annotate_result_light[0][i]}"\n""")
+                start = end
+                try:
+                    end = start + len(annotate_result_light[0][h_keys[count + 1]])
+                except:
+                    end = start
+                count += 1
+
+            text_file.write(f"{self.sanger2fasta(str(sanger_seq))}")
+
+
+
+    def find_GGGGS(self,sequence):
+        GGGGS_found = False
+        sequence = Seq(sequence)
+        if sequence.translate().find("GGGGSGGGGSGGGGS") > -1:
+            split_pos = sequence.translate().find("GGGGSGGGGSGGGGS")
+            return 0, False, split_pos
+        elif sequence[1:].translate().find("GGGGSGGGGSGGGGS") > -1:
+            split_pos = sequence[1:].translate().find("GGGGSGGGGSGGGGS")
+            return 1, False, split_pos
+        elif sequence[2:].translate().find("GGGGSGGGGSGGGGS") > -1:
+            split_pos = sequence[2:].translate().find("GGGGSGGGGSGGGGS")
+            return 2, False, split_pos
+        elif sequence.reverse_complement().translate().find("GGGGSGGGGSGGGGS") > -1:
+            split_pos = sequence.reverse_complement().translate().find("GGGGSGGGGSGGGGS")
+            return 0, True, split_pos
+        elif sequence[1:].reverse_complement().translate().find("GGGGSGGGGSGGGGS") > -1:
+            split_pos = sequence[1:].reverse_complement().translate().find("GGGGSGGGGSGGGGS")
+            return 1, True, split_pos
+        elif sequence[2:].reverse_complement().translate().find("GGGGSGGGGSGGGGS") > -1:
+            split_pos = sequence[2:].reverse_complement().translate().find("GGGGSGGGGSGGGGS")
+            return 2, True, split_pos
+
+    def sanger2fasta(self, sanger_seq):
+        """
+        Formats a Sanger sequence string into a GenBank-like format with line numbers
+        and spaces every 10 characters.
+
+        Args:
+            sanger_seq (str): The input DNA sequence string.
+
+        Returns:
+            str: The formatted sequence string ready for file writing.
+        """
+        # Convert the sequence to lowercase as required
+        sanger_seq_lower = sanger_seq.lower()
+
+        formatted_lines = ["ORIGIN"]
+        line_length = 60  # Number of characters per line in the output
+        chars_per_group = 10  # Number of characters before adding a space
+
+        # Iterate through the sequence, taking chunks of `line_length`
+        for i in range(0, len(sanger_seq_lower), line_length):
+            # Calculate the starting index for the current line (1-based)
+            line_start_index = i + 1
+            # Get the current segment of the sequence
+            segment = sanger_seq_lower[i: i + line_length]
+
+            # Format the segment by adding spaces every `chars_per_group` characters
+            # This uses a generator expression to build parts and then joins them
+            formatted_segment = " ".join([
+                segment[j: j + chars_per_group]
+                for j in range(0, len(segment), chars_per_group)
+            ])
+
+            # Create the full line: padded index + formatted segment
+            # The index is right-aligned and padded to 9 characters
+            formatted_line = f"{line_start_index:9} {formatted_segment}"
+            formatted_lines.append(formatted_line)
+
+        formatted_lines.append("//")  # Add the closing delimiter
+
+        return "\n".join(formatted_lines)
+
+
+def main():
+    root = tk.Tk()
+    app = AntibodyAnnotatorGUI(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
